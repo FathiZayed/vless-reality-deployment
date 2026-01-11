@@ -24,6 +24,46 @@ INSTALL_DIR="/opt/vless-reality"
 mkdir -p "$INSTALL_DIR"
 cd "$INSTALL_DIR"
 
+# **NEW: Port selection**
+echo -e "${CYAN}Port Configuration:${NC}"
+echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo "Select a port for VLESS Reality:"
+echo "  1) 443 (default, recommended)"
+echo "  2) 8443"
+echo "  3) 3000"
+echo "  4) 4433"
+echo "  5) Custom port"
+echo ""
+read -p "Enter your choice (1-5) [default: 1]: " port_choice
+
+case $port_choice in
+    2)
+        SERVER_PORT=8443
+        ;;
+    3)
+        SERVER_PORT=3000
+        ;;
+    4)
+        SERVER_PORT=4433
+        ;;
+    5)
+        read -p "Enter custom port number (1-65535): " custom_port
+        # Validate port number
+        if ! [[ "$custom_port" =~ ^[0-9]+$ ]] || [ "$custom_port" -lt 1 ] || [ "$custom_port" -gt 65535 ]; then
+            echo -e "${RED}✗ Invalid port number. Using default 443${NC}"
+            SERVER_PORT=443
+        else
+            SERVER_PORT=$custom_port
+        fi
+        ;;
+    *)
+        SERVER_PORT=443
+        ;;
+esac
+
+echo -e "${GREEN}✓ Selected port: $SERVER_PORT${NC}"
+echo ""
+
 # Update system
 echo -e "${YELLOW}[1/7] Updating system packages...${NC}"
 apt-get update -qq
@@ -67,11 +107,10 @@ echo -e "${YELLOW}[3/7] Configuring firewall rules...${NC}"
 # Install iptables-persistent
 DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent > /dev/null 2>&1
 
-# Add firewall rules
-iptables -I INPUT -p tcp --dport 443 -j ACCEPT
-iptables -I INPUT -p udp --dport 443 -j ACCEPT
+# Add firewall rules for selected port (TCP)
+iptables -I INPUT -p tcp --dport "$SERVER_PORT" -j ACCEPT
+# Also allow common related ports
 iptables -I INPUT -p tcp --dport 8443 -j ACCEPT
-iptables -I INPUT -p udp --dport 8443 -j ACCEPT
 iptables -I INPUT -p tcp --dport 80 -j ACCEPT
 iptables -I INPUT -p udp --dport 80 -j ACCEPT
 
@@ -166,7 +205,7 @@ echo -e "${YELLOW}[5/7] Creating configuration...${NC}"
 cat > "$INSTALL_DIR/config.json" << EOF
 {
   "inbounds": [{
-    "port": 443,
+    "port": $SERVER_PORT,
     "listen": "0.0.0.0",
     "protocol": "vless",
     "settings": {
@@ -285,8 +324,8 @@ docker run -d \
     --name xray-reality \
     --restart unless-stopped \
     --privileged \
-    -p 443:443/tcp \
-    -p 443:443/udp \
+    -p "$SERVER_PORT:$SERVER_PORT/tcp" \
+    -p "$SERVER_PORT:$SERVER_PORT/udp" \
     -v "$INSTALL_DIR/config.json":/etc/xray/config.json:ro \
     -v "$INSTALL_DIR/logs":/var/log/xray \
     -e TZ=UTC \
@@ -316,7 +355,7 @@ cat > "$INSTALL_DIR/vless-credentials.txt" << EOL
 Server Information:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   Server IP:        $SERVER_IP
-  Port:             443
+  Port:             $SERVER_PORT
   Protocol:         VLESS
   Network:          TCP
   Security:         Reality
@@ -347,7 +386,7 @@ Available SNI Options (choose one):
 
 Client Configuration String:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-vless://${NEW_UUID}@${SERVER_IP}:443?type=tcp&security=reality&pbk=${NEW_PUBLIC_KEY}&fp=chrome&sni=speedtest.net&sid=${NEW_SHORT_ID}&flow=xtls-rprx-vision#VLESS-Reality
+vless://${NEW_UUID}@${SERVER_IP}:${SERVER_PORT}?type=tcp&security=reality&pbk=${NEW_PUBLIC_KEY}&fp=chrome&sni=speedtest.net&sid=${NEW_SHORT_ID}&flow=xtls-rprx-vision#VLESS-Reality
 
 Alternative SNI:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -370,7 +409,7 @@ echo ""
 echo -e "${CYAN}Server Information:${NC}"
 echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo -e "  ${GREEN}Server IP:${NC}        ${MAGENTA}$SERVER_IP${NC}"
-echo -e "  ${GREEN}Port:${NC}             ${MAGENTA}443${NC}"
+echo -e "  ${GREEN}Port:${NC}             ${MAGENTA}$SERVER_PORT${NC}"
 echo -e "  ${GREEN}Protocol:${NC}         ${MAGENTA}VLESS${NC}"
 echo -e "  ${GREEN}Network:${NC}          ${MAGENTA}TCP${NC}"
 echo -e "  ${GREEN}Security:${NC}         ${MAGENTA}Reality${NC}"
