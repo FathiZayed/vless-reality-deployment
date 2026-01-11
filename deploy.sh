@@ -30,7 +30,7 @@ apt-get update -qq
 
 # Install required packages
 echo -e "${YELLOW}[2/7] Installing required packages...${NC}"
-apt-get install -y curl openssl jq wget > /dev/null 2>&1
+apt-get install -y curl openssl jq wget unzip > /dev/null 2>&1
 
 # Install Docker if not installed
 if ! command -v docker &> /dev/null; then
@@ -83,26 +83,50 @@ echo -e "${GREEN}✓ Firewall rules configured and saved${NC}"
 # Generate new credentials
 echo -e "${YELLOW}[4/7] Generating new credentials...${NC}"
 
-# **FIX: Use Docker to generate Xray keys reliably**
-# Download Xray binary in a temporary container
-echo "Generating Xray credentials..."
+# **FIX: Download Xray binary directly to host first**
+echo "Downloading Xray binary..."
 
-# Create temporary container to generate keys
-TEMP_CONTAINER=$(docker run -d alpine:latest sleep 300)
+XRAY_BINARY="$INSTALL_DIR/xray"
+XRAY_URL="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
 
-# Download Xray binary to container
-docker exec "$TEMP_CONTAINER" sh -c 'apk add --no-cache curl unzip && mkdir -p /tmp/xray && curl -L https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip -o /tmp/xray.zip && unzip -q /tmp/xray.zip -d /tmp/xray && chmod +x /tmp/xray/xray' > /dev/null 2>&1
+# Download and extract
+if ! wget -q -O /tmp/xray.zip "$XRAY_URL"; then
+    echo -e "${RED}✗ Failed to download Xray binary${NC}"
+    exit 1
+fi
+
+if ! unzip -q /tmp/xray.zip -d "$INSTALL_DIR" xray; then
+    echo -e "${RED}✗ Failed to extract Xray binary${NC}"
+    rm -f /tmp/xray.zip
+    exit 1
+fi
+
+chmod +x "$XRAY_BINARY"
+rm -f /tmp/xray.zip
+
+# Verify Xray was extracted
+if [ ! -f "$XRAY_BINARY" ]; then
+    echo -e "${RED}✗ Xray binary not found after extraction${NC}"
+    exit 1
+fi
 
 # Generate UUID
-NEW_UUID=$(docker exec "$TEMP_CONTAINER" /tmp/xray/xray uuid)
+NEW_UUID=$("$XRAY_BINARY" uuid)
+
+if [ -z "$NEW_UUID" ]; then
+    echo -e "${RED}✗ Failed to generate UUID${NC}"
+    exit 1
+fi
 
 # Generate Reality keys
-KEYS_OUTPUT=$(docker exec "$TEMP_CONTAINER" /tmp/xray/xray x25519)
+KEYS_OUTPUT=$("$XRAY_BINARY" x25519)
 NEW_PRIVATE_KEY=$(echo "$KEYS_OUTPUT" | grep "Private key:" | awk '{print $3}')
 NEW_PUBLIC_KEY=$(echo "$KEYS_OUTPUT" | grep "Public key:" | awk '{print $3}')
 
-# Clean up temporary container
-docker rm -f "$TEMP_CONTAINER" > /dev/null 2>&1
+if [ -z "$NEW_PRIVATE_KEY" ] || [ -z "$NEW_PUBLIC_KEY" ]; then
+    echo -e "${RED}✗ Failed to generate Reality keys${NC}"
+    exit 1
+fi
 
 # Generate short ID (8 hex characters)
 NEW_SHORT_ID=$(openssl rand -hex 4)
@@ -113,15 +137,9 @@ if [ -z "$SERVER_IP" ]; then
     SERVER_IP=$(hostname -I | awk '{print $1}')
 fi
 
-# Validate credentials were generated
-if [ -z "$NEW_UUID" ] || [ -z "$NEW_PRIVATE_KEY" ] || [ -z "$NEW_PUBLIC_KEY" ]; then
-    echo -e "${RED}✗ Failed to generate credentials${NC}"
-    exit 1
-fi
-
 echo -e "${GREEN}✓ Credentials generated successfully${NC}"
 
-# Create config.json if it doesn't exist
+# Create config.json
 echo -e "${YELLOW}[5/7] Creating configuration...${NC}"
 
 cat > "$INSTALL_DIR/config.json" << EOF
@@ -202,27 +220,17 @@ fi
 # Deploy container
 echo -e "${YELLOW}[6/7] Building Docker image...${NC}"
 
-# **FIX: Build image locally instead of pulling**
 # Create Dockerfile in temporary location
 cat > "$INSTALL_DIR/Dockerfile.build" << 'DOCKERFILE_EOF'
 FROM alpine:latest
 
 # Install Xray
-RUN apk add --no-cache ca-certificates curl unzip && \
-    mkdir -p /usr/local/share/xray /var/log/xray && \
-    curl -L https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip -o /tmp/xray.zip && \
-    unzip -q /tmp/xray.zip -d /usr/local/bin && \
-    chmod +x /usr/local/bin/xray && \
-    rm /tmp/xray.zip && \
-    apk del unzip && \
-    apk del curl
+RUN apk add --no-cache ca-certificates && \
+    mkdir -p /usr/local/share/xray /var/log/xray
 
-# Download geoip and geosite data
-RUN apk add --no-cache curl && \
-    mkdir -p /usr/local/share/xray && \
-    curl -L https://github.com/v2fly/geoip/releases/latest/download/geoip.dat -o /usr/local/share/xray/geoip.dat && \
-    curl -L https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat -o /usr/local/share/xray/geosite.dat && \
-    apk del curl
+# Copy Xray binary from host
+COPY xray /usr/local/bin/xray
+RUN chmod +x /usr/local/bin/xray
 
 # Create config directory
 RUN mkdir -p /etc/xray /var/log/xray
