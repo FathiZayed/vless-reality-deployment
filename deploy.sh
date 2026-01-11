@@ -121,22 +121,31 @@ fi
 # Generate Reality keys
 KEYS_OUTPUT=$("$XRAY_BINARY" x25519 2>&1)
 
-# Debug: Show what we got
-if [ -z "$KEYS_OUTPUT" ]; then
-    echo -e "${RED}✗ Xray x25519 produced no output${NC}"
-    echo "Checking Xray binary..."
-    file "$XRAY_BINARY"
-    "$XRAY_BINARY" -version 2>&1
-    exit 1
-fi
+# Parse the output - format is "PrivateKey: <key>" and "Password: <key>"
+# Note: Xray uses "Password" for the public key equivalent
+NEW_PRIVATE_KEY=$(echo "$KEYS_OUTPUT" | grep "^PrivateKey:" | awk '{print $2}')
 
-NEW_PRIVATE_KEY=$(echo "$KEYS_OUTPUT" | grep -i "private" | head -1 | awk '{print $NF}')
-NEW_PUBLIC_KEY=$(echo "$KEYS_OUTPUT" | grep -i "public" | head -1 | awk '{print $NF}')
-
-if [ -z "$NEW_PRIVATE_KEY" ] || [ -z "$NEW_PUBLIC_KEY" ]; then
+if [ -z "$NEW_PRIVATE_KEY" ]; then
     echo -e "${RED}✗ Failed to parse Reality keys${NC}"
     echo "Xray output was:"
     echo "$KEYS_OUTPUT"
+    exit 1
+fi
+
+# For VLESS Reality, we need to generate the public key from the private key
+# Use Xray to do this - the Password field is derived from PrivateKey
+NEW_PUBLIC_KEY=$(echo "$KEYS_OUTPUT" | grep "^Password:" | awk '{print $2}')
+
+# If we still don't have it, generate again
+if [ -z "$NEW_PUBLIC_KEY" ]; then
+    # Run x25519 again and extract both values
+    KEYS_OUTPUT=$("$XRAY_BINARY" x25519 2>&1)
+    NEW_PRIVATE_KEY=$(echo "$KEYS_OUTPUT" | grep "^PrivateKey:" | awk '{print $2}')
+    NEW_PUBLIC_KEY=$(echo "$KEYS_OUTPUT" | grep "^Password:" | awk '{print $2}')
+fi
+
+if [ -z "$NEW_PRIVATE_KEY" ] || [ -z "$NEW_PUBLIC_KEY" ]; then
+    echo -e "${RED}✗ Failed to generate Reality keys${NC}"
     exit 1
 fi
 
@@ -171,11 +180,12 @@ cat > "$INSTALL_DIR/config.json" << EOF
     "streamSettings": {
       "network": "tcp",
       "security": "reality",
-      "realitySettings": {
+              "realitySettings": {
         "show": false,
         "dest": "1.1.1.1:443",
         "xver": 0,
         "privateKey": "$NEW_PRIVATE_KEY",
+        "publicKey": "$NEW_PUBLIC_KEY",
         "shortIds": ["$NEW_SHORT_ID"],
         "serverNames": [
           "speedtest.net",
@@ -318,8 +328,8 @@ Authentication:
 
 Reality Keys:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  Public Key:       $NEW_PUBLIC_KEY
   Private Key:      $NEW_PRIVATE_KEY (Keep this SECRET!)
+  Public Key:       $NEW_PUBLIC_KEY
   Short ID:         $NEW_SHORT_ID
 
 Reality Settings:
