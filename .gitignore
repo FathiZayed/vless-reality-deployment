@@ -1,0 +1,22 @@
+# Environment variables and secrets
+.env
+*.bak
+vless-credentials.txt
+
+# Logs
+logs/
+*.log
+
+# Docker
+.docker/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db

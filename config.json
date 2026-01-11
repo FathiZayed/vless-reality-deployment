@@ -1,0 +1,63 @@
+{
+  "inbounds": [{
+    "port": 443,
+    "listen": "0.0.0.0",
+    "protocol": "vless",
+    "settings": {
+      "decryption": "none",
+      "clients": [{
+        "id": "YOUR_UUID_HERE",
+        "flow": "xtls-rprx-vision",
+        "level": 0
+      }]
+    },
+    "streamSettings": {
+      "network": "tcp",
+      "security": "reality",
+      "realitySettings": {
+        "show": false,
+        "dest": "1.1.1.1:443",
+        "xver": 0,
+        "privateKey": "YOUR_PRIVATE_KEY_HERE",
+        "shortIds": ["YOUR_SHORT_ID_HERE"],
+        "serverNames": [
+          "speedtest.net",
+          "one.one.one.one",
+          "cloudflare.com",
+          "office365.emis.gov.eg",
+          "haweya.eg",
+          "ekb.eg",
+          "mcit.gov.eg",
+          "playstation.net",
+          "warthunder.com",
+          "watchit.com",
+          "mbc.net",
+          "netflix.com",
+          "outlook.office365.com",
+          "hdm.tedata.net.eg",
+          "tedata.net.eg",
+          "ims.te.eg",
+          "te.eg"
+        ]
+      },
+      "sockopt": {
+        "tcpFastOpen": true,
+        "tcpKeepAliveInterval": 30,
+        "mark": 255
+      }
+    }
+  }],
+  "outbounds": [{
+    "protocol": "freedom",
+    "settings": {
+      "domainStrategy": "UseIPv4"
+    },
+    "streamSettings": {
+      "sockopt": {
+        "tcpFastOpen": true,
+        "tcpKeepAliveInterval": 30,
+        "mark": 255
+      }
+    }
+  }]
+}

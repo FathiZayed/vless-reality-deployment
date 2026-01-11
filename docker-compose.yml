@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  xray:
+    build: .
+    container_name: xray-reality
+    restart: unless-stopped
+    ports:
+      - "443:443"
+    volumes:
+      - ./config.json:/etc/xray/config.json:ro
+      - ./logs:/var/log/xray
+    environment:
+      - TZ=UTC
+    network_mode: host
