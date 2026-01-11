@@ -2,6 +2,8 @@
 .env
 *.bak
 vless-credentials.txt
+config.json
+Dockerfile.build
 
 # Logs
 logs/
@@ -9,6 +11,7 @@ logs/
 
 # Docker
 .docker/
+.dockerignore
 
 # IDE
 .vscode/
@@ -20,3 +23,8 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+
+# Generated files
+*.zip
+/tmp/
+cache/

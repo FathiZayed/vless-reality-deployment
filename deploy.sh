@@ -20,13 +20,17 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
+INSTALL_DIR="/opt/vless-reality"
+mkdir -p "$INSTALL_DIR"
+cd "$INSTALL_DIR"
+
 # Update system
-echo -e "${YELLOW}[1/6] Updating system packages...${NC}"
+echo -e "${YELLOW}[1/7] Updating system packages...${NC}"
 apt-get update -qq
 
 # Install required packages
-echo -e "${YELLOW}[2/6] Installing required packages...${NC}"
-apt-get install -y curl unzip openssl jq > /dev/null 2>&1
+echo -e "${YELLOW}[2/7] Installing required packages...${NC}"
+apt-get install -y curl openssl jq wget > /dev/null 2>&1
 
 # Install Docker if not installed
 if ! command -v docker &> /dev/null; then
@@ -57,14 +61,8 @@ if ! docker --version &> /dev/null; then
     exit 1
 fi
 
-# Install Xray temporarily for key generation
-if ! command -v xray &> /dev/null; then
-    echo -e "${YELLOW}Installing Xray for key generation...${NC}"
-    bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install > /dev/null 2>&1
-fi
-
 # Configure firewall
-echo -e "${YELLOW}[3/6] Configuring firewall rules...${NC}"
+echo -e "${YELLOW}[3/7] Configuring firewall rules...${NC}"
 
 # Install iptables-persistent
 DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent > /dev/null 2>&1
@@ -83,18 +81,31 @@ netfilter-persistent save > /dev/null 2>&1
 echo -e "${GREEN}✓ Firewall rules configured and saved${NC}"
 
 # Generate new credentials
-echo -e "${YELLOW}[4/6] Generating new credentials...${NC}"
+echo -e "${YELLOW}[4/7] Generating new credentials...${NC}"
+
+# **FIX: Use Docker to generate Xray keys reliably**
+# Download Xray binary in a temporary container
+echo "Generating Xray credentials..."
+
+# Create temporary container to generate keys
+TEMP_CONTAINER=$(docker run -d alpine:latest sleep 300)
+
+# Download Xray binary to container
+docker exec "$TEMP_CONTAINER" sh -c 'apk add --no-cache curl unzip && mkdir -p /tmp/xray && curl -L https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip -o /tmp/xray.zip && unzip -q /tmp/xray.zip -d /tmp/xray && chmod +x /tmp/xray/xray' > /dev/null 2>&1
 
 # Generate UUID
-NEW_UUID=$(xray uuid)
+NEW_UUID=$(docker exec "$TEMP_CONTAINER" /tmp/xray/xray uuid)
 
 # Generate Reality keys
-KEYS=$(xray x25519)
-NEW_PRIVATE_KEY=$(echo "$KEYS" | grep "Private key:" | awk '{print $3}')
-NEW_PUBLIC_KEY=$(echo "$KEYS" | grep "Public key:" | awk '{print $3}')
+KEYS_OUTPUT=$(docker exec "$TEMP_CONTAINER" /tmp/xray/xray x25519)
+NEW_PRIVATE_KEY=$(echo "$KEYS_OUTPUT" | grep "Private key:" | awk '{print $3}')
+NEW_PUBLIC_KEY=$(echo "$KEYS_OUTPUT" | grep "Public key:" | awk '{print $3}')
 
-# Generate short ID
-NEW_SHORT_ID=$(openssl rand -hex 8)
+# Clean up temporary container
+docker rm -f "$TEMP_CONTAINER" > /dev/null 2>&1
+
+# Generate short ID (8 hex characters)
+NEW_SHORT_ID=$(openssl rand -hex 4)
 
 # Get server IP
 SERVER_IP=$(curl -s https://api.ipify.org)
@@ -102,25 +113,84 @@ if [ -z "$SERVER_IP" ]; then
     SERVER_IP=$(hostname -I | awk '{print $1}')
 fi
 
-echo -e "${GREEN}✓ Credentials generated${NC}"
-
-# Update config.json
-echo -e "${YELLOW}[5/6] Updating configuration...${NC}"
-
-if [ ! -f "config.json" ]; then
-    echo -e "${RED}Error: config.json not found in current directory${NC}"
+# Validate credentials were generated
+if [ -z "$NEW_UUID" ] || [ -z "$NEW_PRIVATE_KEY" ] || [ -z "$NEW_PUBLIC_KEY" ]; then
+    echo -e "${RED}✗ Failed to generate credentials${NC}"
     exit 1
 fi
 
-# Backup original config
-cp config.json config.json.bak
+echo -e "${GREEN}✓ Credentials generated successfully${NC}"
 
-# Update config with new credentials
-sed -i "s/\"id\": \"[^\"]*\"/\"id\": \"$NEW_UUID\"/g" config.json
-sed -i "s/\"privateKey\": \"[^\"]*\"/\"privateKey\": \"$NEW_PRIVATE_KEY\"/g" config.json
-sed -i "s/\"shortIds\": \[[^]]*\]/\"shortIds\": [\"$NEW_SHORT_ID\"]/g" config.json
+# Create config.json if it doesn't exist
+echo -e "${YELLOW}[5/7] Creating configuration...${NC}"
 
-echo -e "${GREEN}✓ Configuration updated${NC}"
+cat > "$INSTALL_DIR/config.json" << EOF
+{
+  "inbounds": [{
+    "port": 443,
+    "listen": "0.0.0.0",
+    "protocol": "vless",
+    "settings": {
+      "decryption": "none",
+      "clients": [{
+        "id": "$NEW_UUID",
+        "flow": "xtls-rprx-vision",
+        "level": 0
+      }]
+    },
+    "streamSettings": {
+      "network": "tcp",
+      "security": "reality",
+      "realitySettings": {
+        "show": false,
+        "dest": "1.1.1.1:443",
+        "xver": 0,
+        "privateKey": "$NEW_PRIVATE_KEY",
+        "shortIds": ["$NEW_SHORT_ID"],
+        "serverNames": [
+          "speedtest.net",
+          "one.one.one.one",
+          "cloudflare.com",
+          "office365.emis.gov.eg",
+          "haweya.eg",
+          "ekb.eg",
+          "mcit.gov.eg",
+          "playstation.net",
+          "warthunder.com",
+          "watchit.com",
+          "mbc.net",
+          "netflix.com",
+          "outlook.office365.com",
+          "hdm.tedata.net.eg",
+          "tedata.net.eg",
+          "ims.te.eg",
+          "te.eg"
+        ]
+      },
+      "sockopt": {
+        "tcpFastOpen": true,
+        "tcpKeepAliveInterval": 30,
+        "mark": 255
+      }
+    }
+  }],
+  "outbounds": [{
+    "protocol": "freedom",
+    "settings": {
+      "domainStrategy": "UseIPv4"
+    },
+    "streamSettings": {
+      "sockopt": {
+        "tcpFastOpen": true,
+        "tcpKeepAliveInterval": 30,
+        "mark": 255
+      }
+    }
+  }]
+}
+EOF
+
+echo -e "${GREEN}✓ Configuration created${NC}"
 
 # Stop existing container if running
 if [ "$(docker ps -aq -f name=xray-reality)" ]; then
@@ -130,27 +200,85 @@ if [ "$(docker ps -aq -f name=xray-reality)" ]; then
 fi
 
 # Deploy container
-echo -e "${YELLOW}[6/6] Deploying VLESS Reality from GHCR...${NC}"
+echo -e "${YELLOW}[6/7] Building Docker image...${NC}"
 
-# Pull latest image
-docker pull ghcr.io/fathizayed/vless-reality-deployment:latest > /dev/null 2>&1
+# **FIX: Build image locally instead of pulling**
+# Create Dockerfile in temporary location
+cat > "$INSTALL_DIR/Dockerfile.build" << 'DOCKERFILE_EOF'
+FROM alpine:latest
+
+# Install Xray
+RUN apk add --no-cache ca-certificates curl unzip && \
+    mkdir -p /usr/local/share/xray /var/log/xray && \
+    curl -L https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip -o /tmp/xray.zip && \
+    unzip -q /tmp/xray.zip -d /usr/local/bin && \
+    chmod +x /usr/local/bin/xray && \
+    rm /tmp/xray.zip && \
+    apk del unzip && \
+    apk del curl
+
+# Download geoip and geosite data
+RUN apk add --no-cache curl && \
+    mkdir -p /usr/local/share/xray && \
+    curl -L https://github.com/v2fly/geoip/releases/latest/download/geoip.dat -o /usr/local/share/xray/geoip.dat && \
+    curl -L https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat -o /usr/local/share/xray/geosite.dat && \
+    apk del curl
+
+# Create config directory
+RUN mkdir -p /etc/xray /var/log/xray
+
+# Expose port
+EXPOSE 443
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD ps aux | grep -q '[/]xray' || exit 1
+
+# Run Xray
+CMD ["/usr/local/bin/xray", "run", "-config", "/etc/xray/config.json"]
+DOCKERFILE_EOF
+
+# Build the image
+docker build -f "$INSTALL_DIR/Dockerfile.build" -t xray-reality-local "$INSTALL_DIR" > /dev/null 2>&1
+
+if [ $? -ne 0 ]; then
+    echo -e "${RED}✗ Docker build failed${NC}"
+    exit 1
+fi
+
+echo -e "${GREEN}✓ Docker image built successfully${NC}"
 
 # Run container
+echo -e "${YELLOW}[7/7] Deploying VLESS Reality container...${NC}"
+
 docker run -d \
     --name xray-reality \
     --restart unless-stopped \
-    --network host \
-    -v $(pwd)/config.json:/etc/xray/config.json:ro \
-    -v $(pwd)/logs:/var/log/xray \
-    ghcr.io/fathizayed/vless-reality-deployment:latest
+    --privileged \
+    -p 443:443/tcp \
+    -p 443:443/udp \
+    -v "$INSTALL_DIR/config.json":/etc/xray/config.json:ro \
+    -v "$INSTALL_DIR/logs":/var/log/xray \
+    -e TZ=UTC \
+    xray-reality-local > /dev/null 2>&1
 
 # Wait for container to start
 sleep 3
 
+# **FIX: Validate container is running**
+if ! docker ps | grep -q xray-reality; then
+    echo -e "${RED}✗ Container failed to start. Check logs:${NC}"
+    docker logs xray-reality
+    exit 1
+fi
+
 echo -e "${GREEN}✓ VLESS Reality deployed successfully!${NC}"
 
+# Create logs directory if it doesn't exist
+mkdir -p "$INSTALL_DIR/logs"
+
 # Save credentials to file
-cat > vless-credentials.txt << EOL
+cat > "$INSTALL_DIR/vless-credentials.txt" << EOL
 ╔════════════════════════════════════════════════════════════════╗
 ║           VLESS REALITY SERVER CREDENTIALS                     ║
 ╚════════════════════════════════════════════════════════════════╝
@@ -167,7 +295,7 @@ Server Information:
 Authentication:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   UUID:             $NEW_UUID
-  
+
 Reality Keys:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   Public Key:       $NEW_PUBLIC_KEY
@@ -182,24 +310,25 @@ Reality Settings:
 
 Available SNI Options (choose one):
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  • speedtest.net
-  • one.one.one.one
-  • cloudflare.com
-  • netflix.com
-  • playstation.net
-  • office365.emis.gov.eg
-  • te.eg
-  • tedata.net.eg
+  • speedtest.net              • one.one.one.one         • cloudflare.com
+  • netflix.com                • playstation.net
+  • office365.emis.gov.eg      • te.eg                   • tedata.net.eg
+  • haweya.eg                  • ekb.eg                  • mcit.gov.eg
 
 Client Configuration String:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 vless://${NEW_UUID}@${SERVER_IP}:443?type=tcp&security=reality&pbk=${NEW_PUBLIC_KEY}&fp=chrome&sni=speedtest.net&sid=${NEW_SHORT_ID}&flow=xtls-rprx-vision#VLESS-Reality
 
+Alternative SNI:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Change 'sni=speedtest.net' to any option from the list above
+Example: sni=cloudflare.com or sni=netflix.com
+
 Generated: $(date)
 ╚════════════════════════════════════════════════════════════════╝
 
 ⚠️  IMPORTANT: Keep this file secure and never share the Private Key!
-💡 TIP: You can use any SNI from the list above by changing the 'sni=' parameter
+💡 TIP: You can test different SNI options by changing the 'sni=' parameter
 EOL
 
 # Display credentials
@@ -227,32 +356,20 @@ echo -e "  ${GREEN}Public Key:${NC}       ${MAGENTA}$NEW_PUBLIC_KEY${NC}"
 echo -e "  ${GREEN}Private Key:${NC}      ${RED}$NEW_PRIVATE_KEY${NC} ${YELLOW}(Keep SECRET!)${NC}"
 echo -e "  ${GREEN}Short ID:${NC}         ${MAGENTA}$NEW_SHORT_ID${NC}"
 echo ""
-echo -e "${CYAN}Reality Settings:${NC}"
-echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "  ${GREEN}Destination:${NC}      ${MAGENTA}1.1.1.1:443${NC}"
-echo -e "  ${GREEN}Server Name:${NC}      ${MAGENTA}Choose from list below${NC}"
-echo -e "  ${GREEN}Fingerprint:${NC}      ${MAGENTA}chrome${NC}"
-echo ""
-echo -e "${CYAN}Available SNI Options (choose one):${NC}"
-echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "  ${MAGENTA}• speedtest.net       • one.one.one.one    • cloudflare.com${NC}"
-echo -e "  ${MAGENTA}• netflix.com         • playstation.net${NC}"
-echo -e "  ${MAGENTA}• office365.emis.gov.eg    • te.eg         • tedata.net.eg${NC}"
-echo ""
 echo -e "${CYAN}Client Configuration String:${NC}"
 echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo -e "${GREEN}vless://${NEW_UUID}@${SERVER_IP}:443?type=tcp&security=reality&pbk=${NEW_PUBLIC_KEY}&fp=chrome&sni=speedtest.net&sid=${NEW_SHORT_ID}&flow=xtls-rprx-vision#VLESS-Reality${NC}"
 echo ""
 echo -e "${BLUE}╚════════════════════════════════════════════════════════════════╝${NC}"
 echo ""
-echo -e "${GREEN}✓ Credentials saved to:${NC} ${YELLOW}vless-credentials.txt${NC}"
+echo -e "${GREEN}✓ Credentials saved to:${NC} ${YELLOW}$INSTALL_DIR/vless-credentials.txt${NC}"
 echo ""
 echo -e "${CYAN}Container Status:${NC}"
 docker ps --filter name=xray-reality --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
 echo ""
 echo -e "${YELLOW}Useful Commands:${NC}"
 echo -e "  View logs:        ${GREEN}docker logs -f xray-reality${NC}"
-echo -e "  View credentials: ${GREEN}cat vless-credentials.txt${NC}"
+echo -e "  View credentials: ${GREEN}cat $INSTALL_DIR/vless-credentials.txt${NC}"
 echo -e "  Restart:          ${GREEN}docker restart xray-reality${NC}"
 echo -e "  Stop:             ${GREEN}docker stop xray-reality${NC}"
 echo ""

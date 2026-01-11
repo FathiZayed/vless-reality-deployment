@@ -5,11 +5,18 @@ services:
     build: .
     container_name: xray-reality
     restart: unless-stopped
+    privileged: true
     ports:
-      - "443:443"
+      - "443:443/tcp"
+      - "443:443/udp"
     volumes:
       - ./config.json:/etc/xray/config.json:ro
       - ./logs:/var/log/xray
     environment:
       - TZ=UTC
-    network_mode: host
+    healthcheck:
+      test: ["CMD", "sh", "-c", "ps aux | grep -q '[/]xray' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
