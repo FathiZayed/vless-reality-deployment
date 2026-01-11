@@ -32,23 +32,29 @@ apt-get install -y curl unzip openssl jq > /dev/null 2>&1
 if ! command -v docker &> /dev/null; then
     echo -e "${YELLOW}Installing Docker...${NC}"
     curl -fsSL https://get.docker.com -o get-docker.sh
-    sh get-docker.sh
+    sh get-docker.sh || {
+        # Fallback: manual Docker installation for older Ubuntu
+        echo -e "${YELLOW}Trying alternative Docker installation...${NC}"
+        apt-get remove -y docker docker-engine docker.io containerd runc 2>/dev/null
+        apt-get install -y apt-transport-https ca-certificates curl gnupg lsb-release
+        mkdir -p /etc/apt/keyrings
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+        apt-get update -qq
+        apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+    }
     systemctl enable docker
     systemctl start docker
-    rm get-docker.sh
+    rm -f get-docker.sh
     echo -e "${GREEN}✓ Docker installed${NC}"
 else
     echo -e "${GREEN}✓ Docker already installed${NC}"
 fi
 
-# Install Docker Compose if not installed
-if ! command -v docker-compose &> /dev/null; then
-    echo -e "${YELLOW}Installing Docker Compose...${NC}"
-    curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-    chmod +x /usr/local/bin/docker-compose
-    echo -e "${GREEN}✓ Docker Compose installed${NC}"
-else
-    echo -e "${GREEN}✓ Docker Compose already installed${NC}"
+# Verify Docker is working
+if ! docker --version &> /dev/null; then
+    echo -e "${RED}Docker installation failed. Please install manually.${NC}"
+    exit 1
 fi
 
 # Install Xray temporarily for key generation
@@ -124,10 +130,19 @@ if [ "$(docker ps -aq -f name=xray-reality)" ]; then
 fi
 
 # Deploy container
-echo -e "${YELLOW}[6/6] Deploying VLESS Reality...${NC}"
+echo -e "${YELLOW}[6/6] Deploying VLESS Reality from GHCR...${NC}"
 
-# Build and run
-docker-compose up -d --build > /dev/null 2>&1
+# Pull latest image
+docker pull ghcr.io/fathizayed/vless-reality-deployment:latest > /dev/null 2>&1
+
+# Run container
+docker run -d \
+    --name xray-reality \
+    --restart unless-stopped \
+    --network host \
+    -v $(pwd)/config.json:/etc/xray/config.json:ro \
+    -v $(pwd)/logs:/var/log/xray \
+    ghcr.io/fathizayed/vless-reality-deployment:latest
 
 # Wait for container to start
 sleep 3
