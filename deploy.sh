@@ -119,12 +119,24 @@ if [ -z "$NEW_UUID" ]; then
 fi
 
 # Generate Reality keys
-KEYS_OUTPUT=$("$XRAY_BINARY" x25519)
-NEW_PRIVATE_KEY=$(echo "$KEYS_OUTPUT" | grep "Private key:" | awk '{print $3}')
-NEW_PUBLIC_KEY=$(echo "$KEYS_OUTPUT" | grep "Public key:" | awk '{print $3}')
+KEYS_OUTPUT=$("$XRAY_BINARY" x25519 2>&1)
+
+# Debug: Show what we got
+if [ -z "$KEYS_OUTPUT" ]; then
+    echo -e "${RED}✗ Xray x25519 produced no output${NC}"
+    echo "Checking Xray binary..."
+    file "$XRAY_BINARY"
+    "$XRAY_BINARY" -version 2>&1
+    exit 1
+fi
+
+NEW_PRIVATE_KEY=$(echo "$KEYS_OUTPUT" | grep -i "private" | head -1 | awk '{print $NF}')
+NEW_PUBLIC_KEY=$(echo "$KEYS_OUTPUT" | grep -i "public" | head -1 | awk '{print $NF}')
 
 if [ -z "$NEW_PRIVATE_KEY" ] || [ -z "$NEW_PUBLIC_KEY" ]; then
-    echo -e "${RED}✗ Failed to generate Reality keys${NC}"
+    echo -e "${RED}✗ Failed to parse Reality keys${NC}"
+    echo "Xray output was:"
+    echo "$KEYS_OUTPUT"
     exit 1
 fi
 
