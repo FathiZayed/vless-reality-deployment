@@ -48,7 +48,6 @@ case $port_choice in
         ;;
     5)
         read -p "Enter custom port number (1-65535): " custom_port
-        # Validate port number
         if ! [[ "$custom_port" =~ ^[0-9]+$ ]] || [ "$custom_port" -lt 1 ] || [ "$custom_port" -gt 65535 ]; then
             echo -e "${RED}✗ Invalid port number. Using default 443${NC}"
             SERVER_PORT=443
@@ -65,11 +64,11 @@ echo -e "${GREEN}✓ Selected port: $SERVER_PORT${NC}"
 echo ""
 
 # Update system
-echo -e "${YELLOW}[1/7] Updating system packages...${NC}"
+echo -e "${YELLOW}[1/8] Updating system packages...${NC}"
 apt-get update -qq
 
 # Install required packages
-echo -e "${YELLOW}[2/7] Installing required packages...${NC}"
+echo -e "${YELLOW}[2/8] Installing required packages...${NC}"
 apt-get install -y curl openssl jq wget unzip > /dev/null 2>&1
 
 # Install Docker if not installed
@@ -77,7 +76,6 @@ if ! command -v docker &> /dev/null; then
     echo -e "${YELLOW}Installing Docker...${NC}"
     curl -fsSL https://get.docker.com -o get-docker.sh
     sh get-docker.sh || {
-        # Fallback: manual Docker installation for older Ubuntu
         echo -e "${YELLOW}Trying alternative Docker installation...${NC}"
         apt-get remove -y docker docker-engine docker.io containerd runc 2>/dev/null
         apt-get install -y apt-transport-https ca-certificates curl gnupg lsb-release
@@ -102,14 +100,13 @@ if ! docker --version &> /dev/null; then
 fi
 
 # Configure firewall
-echo -e "${YELLOW}[3/7] Configuring firewall rules...${NC}"
+echo -e "${YELLOW}[3/8] Configuring firewall rules...${NC}"
 
 # Install iptables-persistent
 DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent > /dev/null 2>&1
 
 # Add firewall rules for selected port (TCP)
 iptables -I INPUT -p tcp --dport "$SERVER_PORT" -j ACCEPT
-# Also allow common related ports
 iptables -I INPUT -p tcp --dport 8443 -j ACCEPT
 iptables -I INPUT -p tcp --dport 80 -j ACCEPT
 iptables -I INPUT -p udp --dport 80 -j ACCEPT
@@ -119,16 +116,71 @@ netfilter-persistent save > /dev/null 2>&1
 
 echo -e "${GREEN}✓ Firewall rules configured and saved${NC}"
 
-# Generate new credentials
-echo -e "${YELLOW}[4/7] Generating new credentials...${NC}"
+# Configure IPv6
+echo -e "${YELLOW}[4/8] Configuring IPv6 support...${NC}"
 
-# **FIX: Download Xray binary directly to host first**
+# Enable IPv6 forwarding
+sysctl -w net.ipv6.conf.all.forwarding=1 > /dev/null 2>&1
+
+# Persist IPv6 forwarding across reboots
+if ! grep -q "net.ipv6.conf.all.forwarding=1" /etc/sysctl.conf; then
+    echo "net.ipv6.conf.all.forwarding=1" >> /etc/sysctl.conf
+fi
+
+# Detect the default outbound network interface
+DEFAULT_IFACE=$(ip -6 route show default | awk '/default/ {print $5}' | head -1)
+if [ -z "$DEFAULT_IFACE" ]; then
+    DEFAULT_IFACE=$(ip route show default | awk '/default/ {print $5}' | head -1)
+fi
+
+# Add IPv6 MASQUERADE for host traffic
+ip6tables -t nat -A POSTROUTING -o "$DEFAULT_IFACE" -j MASQUERADE 2>/dev/null || true
+
+# Enable IPv6 in Docker daemon
+DOCKER_DAEMON_FILE="/etc/docker/daemon.json"
+if [ -f "$DOCKER_DAEMON_FILE" ]; then
+    if ! grep -q '"ipv6"' "$DOCKER_DAEMON_FILE"; then
+        python3 -c "
+import json
+with open('$DOCKER_DAEMON_FILE', 'r') as f:
+    d = json.load(f)
+d['ipv6'] = True
+d['fixed-cidr-v6'] = 'fd00::/80'
+with open('$DOCKER_DAEMON_FILE', 'w') as f:
+    json.dump(d, f, indent=2)
+"
+    fi
+else
+    cat > "$DOCKER_DAEMON_FILE" << 'EOF'
+{
+  "ipv6": true,
+  "fixed-cidr-v6": "fd00::/80"
+}
+EOF
+fi
+
+# Restart Docker to apply IPv6 config
+systemctl restart docker
+sleep 2
+
+# Add IPv6 MASQUERADE for Docker container traffic (fd00::/80 range)
+ip6tables -t nat -A POSTROUTING -s fd00::/80 -o "$DEFAULT_IFACE" -j MASQUERADE 2>/dev/null || true
+
+# Save ip6tables rules
+netfilter-persistent save > /dev/null 2>&1
+
+echo -e "${GREEN}✓ IPv6 configured (forwarding + NAT + Docker IPv6 enabled)${NC}"
+echo -e "${GREEN}  Interface: $DEFAULT_IFACE${NC}"
+
+# Generate new credentials
+echo -e "${YELLOW}[5/8] Generating new credentials...${NC}"
+
+# Download Xray binary directly to host
 echo "Downloading Xray binary..."
 
 XRAY_BINARY="$INSTALL_DIR/xray"
 XRAY_URL="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
 
-# Download and extract
 if ! wget -q -O /tmp/xray.zip "$XRAY_URL"; then
     echo -e "${RED}✗ Failed to download Xray binary${NC}"
     exit 1
@@ -143,7 +195,6 @@ fi
 chmod +x "$XRAY_BINARY"
 rm -f /tmp/xray.zip
 
-# Verify Xray was extracted
 if [ ! -f "$XRAY_BINARY" ]; then
     echo -e "${RED}✗ Xray binary not found after extraction${NC}"
     exit 1
@@ -151,7 +202,6 @@ fi
 
 # Generate UUID
 NEW_UUID=$("$XRAY_BINARY" uuid)
-
 if [ -z "$NEW_UUID" ]; then
     echo -e "${RED}✗ Failed to generate UUID${NC}"
     exit 1
@@ -159,25 +209,10 @@ fi
 
 # Generate Reality keys
 KEYS_OUTPUT=$("$XRAY_BINARY" x25519 2>&1)
-
-# Parse the output - format is "PrivateKey: <key>" and "Password: <key>"
-# Note: Xray uses "Password" for the public key equivalent
 NEW_PRIVATE_KEY=$(echo "$KEYS_OUTPUT" | grep "^PrivateKey:" | awk '{print $2}')
-
-if [ -z "$NEW_PRIVATE_KEY" ]; then
-    echo -e "${RED}✗ Failed to parse Reality keys${NC}"
-    echo "Xray output was:"
-    echo "$KEYS_OUTPUT"
-    exit 1
-fi
-
-# For VLESS Reality, we need to generate the public key from the private key
-# Use Xray to do this - the Password field is derived from PrivateKey
 NEW_PUBLIC_KEY=$(echo "$KEYS_OUTPUT" | grep "^Password:" | awk '{print $2}')
 
-# If we still don't have it, generate again
-if [ -z "$NEW_PUBLIC_KEY" ]; then
-    # Run x25519 again and extract both values
+if [ -z "$NEW_PRIVATE_KEY" ] || [ -z "$NEW_PUBLIC_KEY" ]; then
     KEYS_OUTPUT=$("$XRAY_BINARY" x25519 2>&1)
     NEW_PRIVATE_KEY=$(echo "$KEYS_OUTPUT" | grep "^PrivateKey:" | awk '{print $2}')
     NEW_PUBLIC_KEY=$(echo "$KEYS_OUTPUT" | grep "^Password:" | awk '{print $2}')
@@ -191,22 +226,24 @@ fi
 # Generate short ID (8 hex characters)
 NEW_SHORT_ID=$(openssl rand -hex 4)
 
-# Get server IP
+# Get server IPs
 SERVER_IP=$(curl -s https://api.ipify.org)
 if [ -z "$SERVER_IP" ]; then
     SERVER_IP=$(hostname -I | awk '{print $1}')
 fi
 
+SERVER_IPV6=$(ip -6 addr show scope global | awk '/inet6/{print $2}' | cut -d'/' -f1 | head -1)
+
 echo -e "${GREEN}✓ Credentials generated successfully${NC}"
 
 # Create config.json
-echo -e "${YELLOW}[5/7] Creating configuration...${NC}"
+echo -e "${YELLOW}[6/8] Creating configuration...${NC}"
 
 cat > "$INSTALL_DIR/config.json" << EOF
 {
   "inbounds": [{
     "port": $SERVER_PORT,
-    "listen": "0.0.0.0",
+    "listen": "::",
     "protocol": "vless",
     "settings": {
       "decryption": "none",
@@ -219,7 +256,7 @@ cat > "$INSTALL_DIR/config.json" << EOF
     "streamSettings": {
       "network": "tcp",
       "security": "reality",
-              "realitySettings": {
+      "realitySettings": {
         "show": false,
         "dest": "1.1.1.1:443",
         "xver": 0,
@@ -256,7 +293,7 @@ cat > "$INSTALL_DIR/config.json" << EOF
   "outbounds": [{
     "protocol": "freedom",
     "settings": {
-      "domainStrategy": "UseIPv4"
+      "domainStrategy": "UseIPv6v4"
     },
     "streamSettings": {
       "sockopt": {
@@ -278,36 +315,28 @@ if [ "$(docker ps -aq -f name=xray-reality)" ]; then
     docker rm xray-reality > /dev/null 2>&1
 fi
 
-# Deploy container
-echo -e "${YELLOW}[6/7] Building Docker image...${NC}"
+# Build Docker image
+echo -e "${YELLOW}[7/8] Building Docker image...${NC}"
 
-# Create Dockerfile in temporary location
 cat > "$INSTALL_DIR/Dockerfile.build" << 'DOCKERFILE_EOF'
 FROM alpine:latest
 
-# Install Xray
 RUN apk add --no-cache ca-certificates && \
     mkdir -p /usr/local/share/xray /var/log/xray
 
-# Copy Xray binary from host
 COPY xray /usr/local/bin/xray
 RUN chmod +x /usr/local/bin/xray
 
-# Create config directory
 RUN mkdir -p /etc/xray /var/log/xray
 
-# Expose port
 EXPOSE 443
 
-# Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD ps aux | grep -q '[/]xray' || exit 1
 
-# Run Xray
 CMD ["/usr/local/bin/xray", "run", "-config", "/etc/xray/config.json"]
 DOCKERFILE_EOF
 
-# Build the image
 docker build -f "$INSTALL_DIR/Dockerfile.build" -t xray-reality-local "$INSTALL_DIR" > /dev/null 2>&1
 
 if [ $? -ne 0 ]; then
@@ -317,8 +346,8 @@ fi
 
 echo -e "${GREEN}✓ Docker image built successfully${NC}"
 
-# Run container
-echo -e "${YELLOW}[7/7] Deploying VLESS Reality container...${NC}"
+# Deploy container
+echo -e "${YELLOW}[8/8] Deploying VLESS Reality container...${NC}"
 
 docker run -d \
     --name xray-reality \
@@ -334,7 +363,6 @@ docker run -d \
 # Wait for container to start
 sleep 3
 
-# **FIX: Validate container is running**
 if ! docker ps | grep -q xray-reality; then
     echo -e "${RED}✗ Container failed to start. Check logs:${NC}"
     docker logs xray-reality
@@ -343,7 +371,6 @@ fi
 
 echo -e "${GREEN}✓ VLESS Reality deployed successfully!${NC}"
 
-# Create logs directory if it doesn't exist
 mkdir -p "$INSTALL_DIR/logs"
 
 # Save credentials to file
@@ -354,7 +381,8 @@ cat > "$INSTALL_DIR/vless-credentials.txt" << EOL
 
 Server Information:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  Server IP:        $SERVER_IP
+  Server IP (IPv4): $SERVER_IP
+  Server IP (IPv6): ${SERVER_IPV6:-N/A}
   Port:             $SERVER_PORT
   Protocol:         VLESS
   Network:          TCP
@@ -384,9 +412,13 @@ Available SNI Options (choose one):
   • office365.emis.gov.eg      • te.eg                   • tedata.net.eg
   • haweya.eg                  • ekb.eg                  • mcit.gov.eg
 
-Client Configuration String:
+Client Configuration String (IPv4):
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 vless://${NEW_UUID}@${SERVER_IP}:${SERVER_PORT}?type=tcp&security=reality&pbk=${NEW_PUBLIC_KEY}&fp=chrome&sni=speedtest.net&sid=${NEW_SHORT_ID}&flow=xtls-rprx-vision#VLESS-Reality
+
+Client Configuration String (IPv6):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+vless://${NEW_UUID}@[${SERVER_IPV6}]:${SERVER_PORT}?type=tcp&security=reality&pbk=${NEW_PUBLIC_KEY}&fp=chrome&sni=speedtest.net&sid=${NEW_SHORT_ID}&flow=xtls-rprx-vision#VLESS-Reality-IPv6
 
 Alternative SNI:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -398,6 +430,7 @@ Generated: $(date)
 
 ⚠️  IMPORTANT: Keep this file secure and never share the Private Key!
 💡 TIP: You can test different SNI options by changing the 'sni=' parameter
+📝 NOTE: IPv6 address may change on reboot (Oracle Cloud dynamic IPv6)
 EOL
 
 # Display credentials
@@ -408,7 +441,8 @@ echo -e "${BLUE}╚════════════════════�
 echo ""
 echo -e "${CYAN}Server Information:${NC}"
 echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "  ${GREEN}Server IP:${NC}        ${MAGENTA}$SERVER_IP${NC}"
+echo -e "  ${GREEN}Server IP (IPv4):${NC} ${MAGENTA}$SERVER_IP${NC}"
+echo -e "  ${GREEN}Server IP (IPv6):${NC} ${MAGENTA}${SERVER_IPV6:-N/A}${NC}"
 echo -e "  ${GREEN}Port:${NC}             ${MAGENTA}$SERVER_PORT${NC}"
 echo -e "  ${GREEN}Protocol:${NC}         ${MAGENTA}VLESS${NC}"
 echo -e "  ${GREEN}Network:${NC}          ${MAGENTA}TCP${NC}"
@@ -425,10 +459,16 @@ echo -e "  ${GREEN}Public Key:${NC}       ${MAGENTA}$NEW_PUBLIC_KEY${NC}"
 echo -e "  ${GREEN}Private Key:${NC}      ${RED}$NEW_PRIVATE_KEY${NC} ${YELLOW}(Keep SECRET!)${NC}"
 echo -e "  ${GREEN}Short ID:${NC}         ${MAGENTA}$NEW_SHORT_ID${NC}"
 echo ""
-echo -e "${CYAN}Client Configuration String:${NC}"
+echo -e "${CYAN}Client Configuration String (IPv4):${NC}"
 echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${GREEN}vless://${NEW_UUID}@${SERVER_IP}:443?type=tcp&security=reality&pbk=${NEW_PUBLIC_KEY}&fp=chrome&sni=speedtest.net&sid=${NEW_SHORT_ID}&flow=xtls-rprx-vision#VLESS-Reality${NC}"
+echo -e "${GREEN}vless://${NEW_UUID}@${SERVER_IP}:${SERVER_PORT}?type=tcp&security=reality&pbk=${NEW_PUBLIC_KEY}&fp=chrome&sni=speedtest.net&sid=${NEW_SHORT_ID}&flow=xtls-rprx-vision#VLESS-Reality${NC}"
 echo ""
+if [ -n "$SERVER_IPV6" ]; then
+echo -e "${CYAN}Client Configuration String (IPv6):${NC}"
+echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${GREEN}vless://${NEW_UUID}@[${SERVER_IPV6}]:${SERVER_PORT}?type=tcp&security=reality&pbk=${NEW_PUBLIC_KEY}&fp=chrome&sni=speedtest.net&sid=${NEW_SHORT_ID}&flow=xtls-rprx-vision#VLESS-Reality-IPv6${NC}"
+echo ""
+fi
 echo -e "${BLUE}╚════════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 echo -e "${GREEN}✓ Credentials saved to:${NC} ${YELLOW}$INSTALL_DIR/vless-credentials.txt${NC}"
@@ -444,4 +484,5 @@ echo -e "  Stop:             ${GREEN}docker stop xray-reality${NC}"
 echo ""
 echo -e "${RED}⚠️  SECURITY WARNING:${NC}"
 echo -e "${YELLOW}Keep 'vless-credentials.txt' secure and never share the Private Key!${NC}"
+echo -e "${YELLOW}Oracle Cloud IPv6 is dynamic — it may change on reboot.${NC}"
 echo ""
